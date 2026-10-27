@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MJO Monitor</title>
+<style>
+:root{--bg:#fbfbfa;--fg:#1c1c1a;--mut:#6b6b66;--grid:#d9d8d2;--card:#f1f0ec;--acc:#0b6e99;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17181a;--fg:#ececea;--mut:#9a9a94;--grid:#3a3b3e;--card:#232427;--acc:#5bb8e0}}
+:root[data-theme="dark"]{--bg:#17181a;--fg:#ececea;--mut:#9a9a94;--grid:#3a3b3e;--card:#232427;--acc:#5bb8e0}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:780px;margin:0 auto;padding:16px}
+h1{font-size:21px;margin:0 0 2px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:12px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+.hi{display:none}
+button,input,select{font:inherit;color:var(--fg);background:var(--card);border:1px solid var(--grid);border-radius:8px;padding:6px 10px}
+input[type=checkbox]{padding:0}input[type=number]{width:80px}
+button{cursor:pointer}button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+label{font-size:13px;color:var(--mut);display:flex;gap:6px;align-items:center}
+svg{width:100%;height:auto;display:block;border:1px solid var(--grid);border-radius:10px;user-select:none;-webkit-user-select:none}
+.stats{margin-top:10px;font-size:13px;color:var(--mut)}
+.badge{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;background:var(--card);border:1px solid var(--grid)}
+table{border-collapse:collapse;font-size:13px;margin-top:6px}td{padding:4px 10px;border-bottom:1px solid var(--grid)}
+.foot{margin-top:18px;font-size:12px;color:var(--mut)}
+</style>
+</head>
+<body>
+<main>
+<h1>MJO monitor</h1>
+<div class="sub">Wheeler–Hendon RMM index · live and archive · <span class="badge" id="src">loading…</span></div>
+<div class="bar" id="tabs">
+  <button data-t="phase">Phase diagram</button><button data-t="strip">Phase strip</button>
+  <button data-t="hist">Climatology</button><button data-t="analog">Analogs</button>
+</div>
+<div class="bar rg">
+  <button data-p="30">Last 30 d</button><button data-p="90">Last 90 d</button><button data-p="365">Last 365 d</button>
+  <label>Month <input type="month" id="mon"></label>
+</div>
+<div class="bar rg">
+  <label>From <input type="date" id="d0"></label><label>To <input type="date" id="d1"></label>
+  <button id="go">Plot</button>
+</div>
+<div class="bar ph">
+  <label>Compare year <input type="number" id="cy" value="2023" min="1975" max="2030"></label>
+  <button id="cmp">Compare</button><button id="clr">Clear</button>
+  <label><input type="checkbox" id="cyc"> Cyclones</label>
+  <label>Events CSV <input type="file" id="evf" accept=".csv,.txt"></label>
+  <button id="zin">+</button><button id="zout">−</button><button id="zrst">Reset zoom</button>
+</div>
+<div class="bar hi">
+  <label>Season <select id="season"><option value="nem">NEM (Oct–Dec)</option><option value="sw">SW monsoon (Jun–Sep)</option><option value="pre">Pre-monsoon (Mar–May)</option><option value="win">Winter (Jan–Feb)</option><option value="all">All year</option></select></label>
+  <label>Highlight year <input type="number" id="hy" min="1975" max="2030"></label>
+</div>
+<div class="bar"><button id="png">Download PNG</button></div>
+<svg id="svg" viewBox="0 0 640 690" xmlns="http://www.w3.org/2000/svg"></svg>
+<div class="stats" id="stats"></div>
+<div id="alist"></div>
+<div class="foot">Phase diagram: click to zoom, shift-click to zoom out, drag to pan. Events CSV format: <code>YYYY-MM-DD,name</code> (for example cyclone genesis dates). Data: BoM RMM, refreshed daily by GitHub Actions into mjo.json.</div>
+</main>
+<script>
+const DAY=864e5,S=70,CX=320,CY=330,NS='http://www.w3.org/2000/svg',$=id=>document.getElementById(id);
+const ymd=t=>new Date(t).toISOString().slice(0,10),ms=s=>Date.parse(s+'T00:00:00Z');
+const PC=k=>`hsl(${(k-1)*45} 70% 48%)`,GR='#9a9a96',cA=f=>`hsl(${210-f*185} 80% ${62-f*12}%)`,cB=f=>`hsl(${300-f*40} 65% ${58-f*10}%)`;
+let DATA=[],IDX={},EV=[],A=[0,0],B=null,tab='phase',FW=640,FH=690,vb={x:0,y:0,w:640,h:690},drag=null;
+const svgEl=$('svg');
+function sample(){let seed=7;const r=()=>(seed=seed*16807%2147483647)/2147483647;let a=3.4,m=1.2,o=[];
+  for(let t=ms('2005-01-01');t<=ms('2026-10-25');t+=DAY){a+=(2*Math.PI/48)*(.3+1.4*r());m=Math.max(.25,m+(r()-.5)*.28+(1.3-m)*.05);
+    o.push([ymd(t),+(m*Math.cos(a)).toFixed(3),+(m*Math.sin(a)).toFixed(3)])}return o}
+async function load(){
+  try{const j=await(await fetch('mjo.json',{cache:'no-store'})).json();DATA=j.data;$('src').textContent='Data updated '+(j.updated||DATA[DATA.length-1][0])}
+  catch(e){DATA=sample();$('src').textContent='Sample data (synthetic), not real MJO'}
+  DATA.forEach((d,i)=>IDX[d[0]]=i);
+  try{EV=await(await fetch('cyclones.json')).json()}catch(e){}
+  const last=DATA[DATA.length-1][0];$('hy').value=last.slice(0,4);$('cy').value=+last.slice(0,4)-1;
+  const h=new URLSearchParams(location.hash.slice(1));
+  if(h.get('a')&&h.get('b')){A=[ms(h.get('a')),ms(h.get('b'))];sync();if(h.get('c')){const c=h.get('c').split('_');B=[ms(c[0]),ms(c[1])]}}
+  else{const l=ms(last);A=[l-89*DAY,l];sync()}
+  setTab(h.get('t')||'phase');
+}
+function sync(){$('d0').value=ymd(A[0]);$('d1').value=ymd(A[1])}
+const phase=(x,y)=>Math.floor((((Math.atan2(y,x)*180/Math.PI+360)%360)-180+360)%360/45)+1;
+const sel=r=>r?DATA.filter(d=>{const t=ms(d[0]);return t>=r[0]&&t<=r[1]}):[];
+function theme(){const c=getComputedStyle(document.documentElement),g=k=>c.getPropertyValue(k).trim();return{bg:g('--bg'),fg:g('--fg'),mut:g('--mut'),grid:g('--grid')}}
+function el(p,n,at,t){const e=document.createElementNS(NS,n);for(const k in at)e.setAttribute(k,at[k]);if(t!=null)e.textContent=t;p.append(e);return e}
+function wm(svg,T,y){el(svg,'text',{x:630,y,'text-anchor':'end','font-size':11,fill:T.mut,'font-style':'italic'},'Vidhyapathi (Haiyan)')}
+const sm=(p,l)=>{if(!p.length)return l+': no data';const c=Array(9).fill(0);let s=0;p.forEach(d=>{if(Math.hypot(d[1],d[2])>=1){s++;c[phase(d[1],d[2])]++}});
+  const e=p[p.length-1],a=Math.hypot(e[1],e[2]);return `<b>${l}</b> ${p[0][0]} → ${e[0]}: ${p.length} d, amplitude ≥ 1 on ${s}; last day `+(a>=1?`phase ${phase(e[1],e[2])}, amp ${a.toFixed(2)}`:`weak (${a.toFixed(2)})`)+'<br>Days per phase: '+c.slice(1).map((v,i)=>`P${i+1} ${v}`).join(' · ')};
+
+function drawPhase(svg,T){
+  const X=v=>CX+v*S,Y=v=>CY-v*S,{bg,fg,mut,grid}=T;
+  el(svg,'rect',{x:0,y:0,width:640,height:690,fill:bg});
+  for(let v=-4;v<=4;v++){
+    el(svg,'line',{x1:X(v),y1:Y(-4),x2:X(v),y2:Y(4),stroke:grid,'stroke-width':v?.5:1});
+    el(svg,'line',{x1:X(-4),y1:Y(v),x2:X(4),y2:Y(v),stroke:grid,'stroke-width':v?.5:1});
+    if(v){el(svg,'text',{x:X(v),y:Y(-4)+14,'text-anchor':'middle','font-size':11,fill:mut},v);el(svg,'text',{x:X(-4)-6,y:Y(v)+4,'text-anchor':'end','font-size':11,fill:mut},v)}}
+  for(let k=0;k<8;k++){const a=(180+45*k)*Math.PI/180,am=a+Math.PI/8;
+    el(svg,'line',{x1:X(Math.cos(a)),y1:Y(Math.sin(a)),x2:X(4*Math.cos(a)),y2:Y(4*Math.sin(a)),stroke:mut});
+    el(svg,'text',{x:X(3.55*Math.cos(am)),y:Y(3.55*Math.sin(am))+5,'text-anchor':'middle','font-size':18,'font-weight':600,fill:mut,opacity:.7},k+1)}
+  el(svg,'circle',{cx:CX,cy:CY,r:S,fill:bg,stroke:mut,'stroke-width':1.2});
+  [['Western Pacific',X(0),Y(3.9),0],['Indian Ocean',X(0),Y(-3.9),0],['Maritime Continent',X(3.85),Y(0),90],['W. Hemisphere & Africa',X(-3.85),Y(0),-90]].forEach(([t,x,y,r])=>
+    el(svg,'text',{x,y,'text-anchor':'middle','dominant-baseline':'central',transform:`rotate(${r} ${x} ${y})`,'font-size':10.5,fill:mut,stroke:bg,'stroke-width':3,'paint-order':'stroke'},t));
+  const pa=sel(A),pb=sel(B);
+  const trk=(p,cf,dash,sw,lc)=>{const n=p.length;if(!n)return;
+    for(let i=1;i<n;i++)el(svg,'line',{x1:X(p[i-1][1]),y1:Y(p[i-1][2]),x2:X(p[i][1]),y2:Y(p[i][2]),stroke:cf(i/(n-1)),'stroke-width':sw,'stroke-dasharray':dash,'stroke-linecap':'round'});
+    const lab=Math.max(1,Math.round(n/10));
+    p.forEach((d,i)=>{const x=X(d[1]),y=Y(d[2]);
+      if(n<=130)el(svg,'circle',{cx:x,cy:y,r:i==n-1?6:2.6,fill:cf(n>1?i/(n-1):1),stroke:i==n-1?fg:'none','stroke-width':1.5});
+      if(i%lab==0||i==n-1)el(svg,'text',{x:x+6,y:y-6,'font-size':10,fill:lc},d[0].slice(n>300?0:5))})};
+  trk(pb,cB,'5 4',1.8,mut);trk(pa,cA,'none',2.4,fg);
+  if($('cyc').checked)EV.forEach(([d,nm])=>{const i=IDX[d];if(i==null)return;const t=ms(d);
+    if(!((t>=A[0]&&t<=A[1])||(B&&t>=B[0]&&t<=B[1])))return;const p=DATA[i];
+    el(svg,'text',{x:X(p[1]),y:Y(p[2])+5,'text-anchor':'middle','font-size':16,fill:'#d33'},'★');
+    el(svg,'text',{x:X(p[1])+8,y:Y(p[2])+17,'font-size':10,fill:'#d33'},nm)});
+  const bar=(x0,cf,p,l)=>{if(!p.length)return;for(let i=0;i<50;i++)el(svg,'rect',{x:x0+i*4,y:644,width:4,height:8,fill:cf(i/49)});
+    el(svg,'text',{x:x0,y:668,'font-size':10,fill:mut},l+' '+p[0][0]);el(svg,'text',{x:x0+200,y:668,'text-anchor':'end','font-size':10,fill:mut},p[p.length-1][0])};
+  bar(30,cA,pa,'A');bar(300,cB,pb,'B');wm(svg,T,684);
+  $('stats').innerHTML=sm(pa,'A')+(B?'<br><br>'+sm(pb,'B (dashed)'):'');
+}
+function drawStrip(svg,T){
+  const{bg,fg,mut,grid}=T;el(svg,'rect',{x:0,y:0,width:640,height:400,fill:bg});
+  const p=sel(A);if(!p.length){$('stats').textContent='No data in this period.';return}
+  const st=Math.ceil(p.length/560),q=p.filter((_,i)=>i%st==0),w=560/q.length;
+  el(svg,'text',{x:40,y:30,'font-size':14,'font-weight':600,fill:fg},'Daily MJO phase · grey = amplitude < 1');
+  q.forEach((d,i)=>{const a=Math.hypot(d[1],d[2]);el(svg,'rect',{x:40+i*w,y:44,width:w+.5,height:40,fill:a>=1?PC(phase(d[1],d[2])):GR})});
+  for(let k=1;k<=9;k++){const x=40+(k-1)*62;el(svg,'rect',{x,y:96,width:10,height:10,fill:k<9?PC(k):GR});el(svg,'text',{x:x+14,y:105,'font-size':10,fill:mut},k<9?'P'+k:'weak')}
+  const Y=a=>350-a*55;
+  for(let a=0;a<=4;a++){el(svg,'line',{x1:40,y1:Y(a),x2:600,y2:Y(a),stroke:a==1?mut:grid,'stroke-dasharray':a==1?'4 3':'none'});el(svg,'text',{x:34,y:Y(a)+4,'text-anchor':'end','font-size':10,fill:mut},a)}
+  el(svg,'text',{x:40,y:126,'font-size':11,fill:mut},'Amplitude');
+  el(svg,'polyline',{points:q.map((d,i)=>`${40+i*w+w/2},${Y(Math.min(4,Math.hypot(d[1],d[2])))}`).join(' '),fill:'none',stroke:T.fg,'stroke-width':1.5});
+  let pk='',lx=-99;q.forEach((d,i)=>{const k=p.length>400?d[0].slice(0,4):d[0].slice(0,7),x=40+i*w;
+    if(k!=pk&&x-lx>=44){el(svg,'line',{x1:x,y1:350,x2:x,y2:355,stroke:mut});el(svg,'text',{x,y:369,'text-anchor':'middle','font-size':10,fill:mut},k);lx=x}if(k!=pk)pk=k});
+  wm(svg,T,392);$('stats').innerHTML=sm(p,'Period')+(st>1?`<br>Showing every ${st}th day.`:'');
+}
+function drawHist(svg,T){
+  const{bg,fg,mut,grid}=T;el(svg,'rect',{x:0,y:0,width:640,height:400,fill:bg});
+  const SE={all:[1,2,3,4,5,6,7,8,9,10,11,12],nem:[10,11,12],sw:[6,7,8,9],pre:[3,4,5],win:[1,2]},mo=SE[$('season').value],yr=$('hy').value,Yr={};
+  DATA.forEach(d=>{if(!mo.includes(+d[0].slice(5,7)))return;const y=d[0].slice(0,4),o=Yr[y]||(Yr[y]={n:0,c:Array(9).fill(0)});o.n++;const a=Math.hypot(d[1],d[2]);o.c[a>=1?phase(d[1],d[2]):0]++});
+  const ok=Object.values(Yr).filter(o=>o.n>=.8*mo.length*30.4),mean=Array(9).fill(0);
+  ok.forEach(o=>o.c.forEach((v,i)=>mean[i]+=v/ok.length));const cur=Yr[yr]?Yr[yr].c:Array(9).fill(0);
+  const order=[1,2,3,4,5,6,7,8,0],mx=Math.max(1,...mean,...cur),top=Math.ceil(mx/5)*5,Y=v=>340-v/top*250;
+  el(svg,'text',{x:40,y:28,'font-size':14,'font-weight':600,fill:fg},$('season').selectedOptions[0].text+': days per phase (amplitude ≥ 1)');
+  for(let i=0;i<=5;i++){const v=top*i/5;el(svg,'line',{x1:40,y1:Y(v),x2:610,y2:Y(v),stroke:grid});el(svg,'text',{x:34,y:Y(v)+4,'text-anchor':'end','font-size':10,fill:mut},Math.round(v))}
+  order.forEach((k,j)=>{const x=46+j*63;
+    el(svg,'rect',{x,y:Y(mean[k]),width:25,height:340-Y(mean[k]),fill:mut,opacity:.6});
+    el(svg,'rect',{x:x+27,y:Y(cur[k]),width:25,height:340-Y(cur[k]),fill:cA(.9)});
+    el(svg,'text',{x:x+26,y:358,'text-anchor':'middle','font-size':11,fill:mut},k?'P'+k:'weak')});
+  el(svg,'rect',{x:300,y:42,width:10,height:10,fill:mut,opacity:.6});el(svg,'text',{x:314,y:51,'font-size':11,fill:mut},`mean of ${ok.length} full years`);
+  el(svg,'rect',{x:460,y:42,width:10,height:10,fill:cA(.9)});el(svg,'text',{x:474,y:51,'font-size':11,fill:mut},yr+(Yr[yr]?'':' (no data)'));
+  wm(svg,T,388);$('stats').innerHTML=`Weak = amplitude below 1 (no clear MJO). A year counts toward the mean only if at least 80% of the season has data.`;
+}
+function analogs(){
+  const L=30,N=DATA.length;let e=IDX[ymd(A[1])];if(e==null)e=N-1;const s=e-L+1;if(s<0){$('alist').textContent='Range ends too early.';return}
+  const res=[];for(let j=L-1;j<N;j++){if(j>=s&&j-L+1<=e)continue;let d=0;for(let k=0;k<L;k++){const u=DATA[j-L+1+k],v=DATA[s+k];d+=Math.hypot(u[1]-v[1],u[2]-v[2])}res.push([d/L,j])}
+  res.sort((a,b)=>a[0]-b[0]);const pk=[];for(const r of res){if(pk.every(q=>Math.abs(q[1]-r[1])>40))pk.push(r);if(pk.length==6)break}
+  $('alist').innerHTML=`<div class="stats">Closest historical 30-day tracks to the 30 days ending <b>${DATA[e][0]}</b> (mean RMM distance). Overlay (B, dashed) also shows the 30 days that followed.</div><table>`+
+    pk.map((r,i)=>`<tr><td>${i+1}</td><td>${DATA[r[1]-L+1][0]} → ${DATA[r[1]][0]}</td><td>${r[0].toFixed(2)}</td><td><button data-j="${r[1]}">Overlay</button></td></tr>`).join('')+'</table>';
+}
+function draw(){
+  const T=theme();svgEl.replaceChildren();const ph=tab=='phase'||tab=='analog';
+  document.querySelectorAll('.ph').forEach(e=>e.style.display=ph?'':'none');
+  document.querySelectorAll('.rg').forEach(e=>e.style.display=tab=='hist'?'none':'');
+  document.querySelectorAll('.hi').forEach(e=>e.style.display=tab=='hist'?'flex':'none');
+  $('alist').innerHTML='';if(!DATA.length)return;
+  if(ph)drawPhase(svgEl,T);else if(tab=='strip')drawStrip(svgEl,T);else drawHist(svgEl,T);
+  if(tab=='analog')analogs();
+  try{const h=new URLSearchParams({t:tab,a:ymd(A[0]),b:ymd(A[1])});if(B)h.set('c',ymd(B[0])+'_'+ymd(B[1]));history.replaceState(null,'','#'+h)}catch(e){}
+}
+function setVB(){vb.x=Math.min(Math.max(vb.x,0),FW-vb.w);vb.y=Math.min(Math.max(vb.y,0),FH-vb.h);
+  svgEl.setAttribute('viewBox',`${vb.x} ${vb.y} ${vb.w} ${vb.h}`);const z=(tab=='phase'||tab=='analog');
+  svgEl.style.touchAction=z&&vb.w<FW?'none':'auto';svgEl.style.cursor=z?(vb.w<FW?'grab':'zoom-in'):'default'}
+function setTab(t){tab=t;document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t==t));
+  FW=640;FH=(t=='phase'||t=='analog')?690:400;vb={x:0,y:0,w:FW,h:FH};setVB();draw()}
+function zoomAt(px,py,f){const w=Math.min(FW,Math.max(80,vb.w*f)),k=w/vb.w;vb={x:px-(px-vb.x)*k,y:py-(py-vb.y)*k,w,h:w*FH/FW};setVB()}
+const toSvg=e=>{const r=svgEl.getBoundingClientRect();return[vb.x+(e.clientX-r.left)/r.width*vb.w,vb.y+(e.clientY-r.top)/r.height*vb.h]};
+svgEl.onpointerdown=e=>{if(tab=='strip'||tab=='hist')return;drag={x:e.clientX,y:e.clientY,vx:vb.x,vy:vb.y,m:false};svgEl.setPointerCapture(e.pointerId)};
+svgEl.onpointermove=e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(Math.abs(dx)+Math.abs(dy)>5)drag.m=true;
+  if(drag.m&&vb.w<FW){const r=svgEl.getBoundingClientRect();vb.x=drag.vx-dx/r.width*vb.w;vb.y=drag.vy-dy/r.height*vb.h;setVB()}};
+svgEl.onpointerup=e=>{if(drag&&!drag.m){const[px,py]=toSvg(e);zoomAt(px,py,e.shiftKey?2:.5)}drag=null};
+svgEl.onpointercancel=()=>{drag=null};
+$('zin').onclick=()=>zoomAt(vb.x+vb.w/2,vb.y+vb.h/2,.5);$('zout').onclick=()=>zoomAt(vb.x+vb.w/2,vb.y+vb.h/2,2);
+$('zrst').onclick=()=>{vb={x:0,y:0,w:FW,h:FH};setVB()};
+const noPreset=()=>document.querySelectorAll('button[data-p]').forEach(b=>b.classList.remove('on'));
+function setRange(a,b){A=[a,b];B=null;sync();draw()}
+document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>setTab(b.dataset.t));
+document.querySelectorAll('button[data-p]').forEach(b=>b.onclick=()=>{noPreset();b.classList.add('on');const l=ms(DATA[DATA.length-1][0]);$('mon').value='';setRange(l-(+b.dataset.p-1)*DAY,l)});
+$('mon').onchange=()=>{if(!$('mon').value)return;const[y,m]=$('mon').value.split('-').map(Number);noPreset();setRange(Date.UTC(y,m-1,1),Date.UTC(y,m,0))};
+$('go').onclick=()=>{if($('d0').value&&$('d1').value&&$('d0').value<=$('d1').value){noPreset();setRange(ms($('d0').value),ms($('d1').value))}};
+$('cmp').onclick=()=>{const sh=+$('cy').value-new Date(A[0]).getUTCFullYear(),f=t=>{const d=new Date(t);return Date.UTC(d.getUTCFullYear()+sh,d.getUTCMonth(),d.getUTCDate())};B=[f(A[0]),f(A[1])];draw()};
+$('clr').onclick=()=>{B=null;draw()};
+$('cyc').onchange=draw;$('season').onchange=draw;$('hy').onchange=draw;
+$('evf').onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{EV=r.result.split(/\r?\n/).map(l=>l.split(',')).filter(a=>/^\d{4}-\d\d-\d\d$/.test((a[0]||'').trim())).map(a=>[a[0].trim(),(a[1]||'').trim()]);$('cyc').checked=true;draw()};r.readAsText(f)};
+$('alist').onclick=e=>{const j=e.target.dataset.j;if(!j)return;const n=DATA.length-1,k=+j;B=[ms(DATA[k-29][0]),ms(DATA[Math.min(n,k+30)][0])];draw()};
+$('png').onclick=()=>{const xml=new XMLSerializer().serializeToString(svgEl),img=new Image();
+  img.onload=()=>{const c=document.createElement('canvas');c.width=1280;c.height=Math.round(1280*vb.h/vb.w);c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+    const a=document.createElement('a');a.download=`mjo_${tab}_${ymd(A[0])}_${ymd(A[1])}.png`;a.href=c.toDataURL('image/png');a.click()};
+  img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(xml)};
+matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>DATA.length&&draw());
+load();
+</script>
+</body>
+</html>
