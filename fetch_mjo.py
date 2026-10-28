@@ -2,9 +2,21 @@
 """Fetch the BoM RMM index and write mjo.json for the MJO monitor."""
 import json, urllib.request
 
-URL = "https://www.bom.gov.au/climate/mjo/graphs/rmm.74toRealtime.txt"
-req = urllib.request.Request(URL, headers={"User-Agent": "Mozilla/5.0 (mjo-monitor)"})
-raw = urllib.request.urlopen(req, timeout=60).read().decode("latin-1")
+URLS = [
+    "https://www.bom.gov.au/clim_data/IDCKGEM000/rmm.74toRealtime.txt",
+    "http://www.bom.gov.au/climate/mjo/graphics/rmm.74toRealtime.txt",
+]
+raw = None
+for url in URLS:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (mjo-monitor)"})
+        raw = urllib.request.urlopen(req, timeout=60).read().decode("latin-1")
+        print("fetched", url)
+        break
+    except Exception as e:
+        print("failed", url, e)
+if raw is None:
+    raise SystemExit("All BoM URLs failed")
 
 rows = []
 for ln in raw.splitlines():
